@@ -94,7 +94,7 @@ fun MainScreen(vm: AppVM) {
     Scaffold(
         topBar = {
             TopAppBar(title = { Text("SALAM-WIFI", fontWeight = FontWeight.Bold) },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = Teal, titleContentColor = Color.White, actionContentColor = Color.White),
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = Teal, titleContentColor = Color.White, actionIconContentColor = Color.White),
                 actions = { TextButton(onClick = { vm.logout() }) { Text("Déconnexion", color = Color.White) } })
         },
         bottomBar = {
