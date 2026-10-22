@@ -57,7 +57,7 @@ fun App(vm: AppVM = viewModel()) {
 fun LoginScreen(vm: AppVM) {
     val c = remember { vm.store.loadCreds() }
     var host by remember { mutableStateOf(c?.host ?: "192.168.88.1") }
-    var port by remember { mutableStateOf(c?.port ?: "8080") }
+    var port by remember { mutableStateOf(c?.port ?: "8728") }
     var user by remember { mutableStateOf(c?.user ?: "") }
     var pass by remember { mutableStateOf(c?.pass ?: "") }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),
@@ -67,7 +67,7 @@ fun LoginScreen(vm: AppVM) {
         Spacer(Modifier.height(28.dp))
         OutlinedTextField(host, { host = it }, label = { Text("Adresse IP du routeur") }, singleLine = true, modifier = Modifier.fillMaxWidth())
         Spacer(Modifier.height(10.dp))
-        OutlinedTextField(port, { port = it.filter(Char::isDigit) }, label = { Text("Port API REST (www)") }, singleLine = true,
+        OutlinedTextField(port, { port = it.filter(Char::isDigit) }, label = { Text("Port API (8728)") }, singleLine = true,
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
         Spacer(Modifier.height(10.dp))
         OutlinedTextField(user, { user = it }, label = { Text("Utilisateur") }, singleLine = true, modifier = Modifier.fillMaxWidth())

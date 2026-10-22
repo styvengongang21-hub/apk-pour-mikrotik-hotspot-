@@ -45,7 +45,7 @@ class AppVM(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             busy = true; loginError = ""
             try {
-                val r = Router(host.trim(), port.trim().toIntOrNull() ?: 8080, user.trim(), pass)
+                val r = Router(host.trim(), port.trim().toIntOrNull() ?: 8728, user.trim(), pass)
                 val (s, p) = withContext(Dispatchers.IO) { r.ping(); Pair(r.servers(), r.profiles()) }
                 router = r; servers = s; profiles = p
                 store.saveCreds(Creds(host.trim(), port.trim(), user.trim(), pass))

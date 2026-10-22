@@ -23,7 +23,7 @@ class Store(private val ctx: Context) {
         .putString("u", c.user).putString("w", c.pass).apply()
     fun loadCreds(): Creds? {
         val h = prefs.getString("h", null) ?: return null
-        return Creds(h, prefs.getString("p", "8080") ?: "8080", prefs.getString("u", "") ?: "", prefs.getString("w", "") ?: "")
+        return Creds(h, prefs.getString("p", "8728") ?: "8728", prefs.getString("u", "") ?: "", prefs.getString("w", "") ?: "")
     }
     fun clearCreds() = prefs.edit().clear().apply()
 

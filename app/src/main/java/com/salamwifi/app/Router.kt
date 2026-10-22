@@ -1,14 +1,12 @@
 package com.salamwifi.app
 
-import okhttp3.Credentials
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
-import org.json.JSONArray
-import org.json.JSONObject
-import java.net.URLEncoder
-import java.util.concurrent.TimeUnit
+import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
+import java.io.DataInputStream
+import java.io.IOException
+import java.io.OutputStream
+import java.net.InetSocketAddress
+import java.net.Socket
 
 data class Profile(val id: String, val name: String, val timeout: Long, val onLogin: String) {
     val installed get() = onLogin.contains("SALAM-WIFI")
@@ -42,66 +40,154 @@ fun fmtDur(s: Long): String {
     }
 }
 
-class Router(val host: String, private val port: Int, user: String, pass: String) {
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(6, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS).build()
-    private val auth = Credentials.basic(user, pass)
-    private val media = "application/json".toMediaType()
-    private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
+class ApiError(msg: String) : RuntimeException(msg)
 
-    private fun call(method: String, path: String, body: JSONObject? = null): String {
-        val rb = when {
-            body != null -> body.toString().toRequestBody(media)
-            method == "GET" || method == "DELETE" -> null
-            else -> "{}".toRequestBody(media)
+/** Client de l'API binaire MikroTik (port 8728), RouterOS 6.43+ et 7. */
+class Router(val host: String, private val port: Int, private val user: String, private val pass: String) {
+    private var sock: Socket? = null
+    private var inp: DataInputStream? = null
+    private var out: OutputStream? = null
+
+    private fun close() {
+        runCatching { sock?.close() }
+        sock = null; inp = null; out = null
+    }
+
+    private fun open() {
+        close()
+        val s = Socket()
+        try {
+            s.connect(InetSocketAddress(host, port), 6000)
+        } catch (e: IOException) {
+            runCatching { s.close() }
+            throw IOException("Impossible de joindre $host:$port. Vérifiez l'IP, le port et que le service API est actif.")
         }
-        val req = Request.Builder().url("http://$host:$port/rest$path")
-            .header("Authorization", auth).method(method, rb).build()
-        client.newCall(req).execute().use { r ->
-            val t = r.body?.string().orEmpty()
-            if (!r.isSuccessful) {
-                val d = runCatching { JSONObject(t).optString("detail") }.getOrDefault("")
-                val hint = if (r.code == 401) " (identifiants refusés)" else ""
-                throw RuntimeException("Erreur ${r.code}: $d$hint".trim())
-            }
-            return t
+        s.soTimeout = 20000
+        sock = s
+        inp = DataInputStream(BufferedInputStream(s.getInputStream()))
+        out = BufferedOutputStream(s.getOutputStream())
+        try {
+            exchange("/login", listOf("=name=$user", "=password=$pass"))
+        } catch (e: ApiError) {
+            close()
+            throw ApiError("Identifiant ou mot de passe refusé par le routeur.")
         }
     }
 
-    private fun list(path: String): List<JSONObject> {
-        val a = JSONArray(call("GET", path))
-        return List(a.length()) { a.getJSONObject(it) }
+    private fun writeWord(o: OutputStream, s: String) {
+        val b = s.toByteArray(Charsets.UTF_8)
+        val n = b.size
+        when {
+            n < 0x80 -> o.write(n)
+            n < 0x4000 -> { o.write((n shr 8) or 0x80); o.write(n and 0xFF) }
+            n < 0x200000 -> { o.write((n shr 16) or 0xC0); o.write((n shr 8) and 0xFF); o.write(n and 0xFF) }
+            else -> { o.write((n shr 24) or 0xE0); o.write((n shr 16) and 0xFF); o.write((n shr 8) and 0xFF); o.write(n and 0xFF) }
+        }
+        o.write(b)
     }
 
-    fun ping() { call("GET", "/system/identity") }
-    fun servers() = list("/ip/hotspot").map { it.getString("name") }
-    fun profiles() = list("/ip/hotspot/user/profile").map {
-        Profile(it.getString(".id"), it.getString("name"), parseDur(it.optString("session-timeout")), it.optString("on-login"))
+    private fun readLen(i: DataInputStream): Int {
+        val c = i.readUnsignedByte()
+        return when {
+            c < 0x80 -> c
+            c < 0xC0 -> ((c and 0x3F) shl 8) or i.readUnsignedByte()
+            c < 0xE0 -> { val b1 = i.readUnsignedByte(); val b2 = i.readUnsignedByte(); ((c and 0x1F) shl 16) or (b1 shl 8) or b2 }
+            c < 0xF0 -> { val b1 = i.readUnsignedByte(); val b2 = i.readUnsignedByte(); val b3 = i.readUnsignedByte()
+                ((c and 0x0F) shl 24) or (b1 shl 16) or (b2 shl 8) or b3 }
+            else -> i.readInt()
+        }
+    }
+
+    private fun readSentence(i: DataInputStream): List<String> {
+        val w = ArrayList<String>()
+        while (true) {
+            val n = readLen(i)
+            if (n == 0) break
+            val b = ByteArray(n)
+            i.readFully(b)
+            w.add(String(b, Charsets.UTF_8))
+        }
+        return w
+    }
+
+    private fun toMap(words: List<String>): Map<String, String> {
+        val m = HashMap<String, String>()
+        for (w in words.drop(1)) {
+            if (!w.startsWith("=")) continue
+            val idx = w.indexOf('=', 1)
+            if (idx < 0) continue
+            m[w.substring(1, idx)] = w.substring(idx + 1)
+        }
+        return m
+    }
+
+    private fun exchange(cmd: String, attrs: List<String>): List<Map<String, String>> {
+        val o = out!!
+        val i = inp!!
+        writeWord(o, cmd)
+        attrs.forEach { writeWord(o, it) }
+        o.write(0)
+        o.flush()
+        val rows = ArrayList<Map<String, String>>()
+        var err: String? = null
+        while (true) {
+            val words = readSentence(i)
+            if (words.isEmpty()) continue
+            val type = words[0]
+            if (type == "!re") rows.add(toMap(words))
+            else if (type == "!trap") err = toMap(words)["message"] ?: "Erreur du routeur"
+            else if (type == "!fatal") throw IOException(words.getOrElse(1) { "Connexion fermée par le routeur" })
+            else if (type == "!done") break
+        }
+        if (err != null) throw ApiError(err)
+        return rows
+    }
+
+    @Synchronized
+    private fun call(cmd: String, vararg attrs: String): List<Map<String, String>> {
+        val a = attrs.toList()
+        val had = sock != null
+        try {
+            if (sock == null) open()
+            return exchange(cmd, a)
+        } catch (e: ApiError) {
+            throw e
+        } catch (e: IOException) {
+            if (!had) throw e
+            open()                      // session perdue : on se reconnecte une fois
+            return exchange(cmd, a)
+        }
+    }
+
+    fun ping() { call("/system/identity/print") }
+    fun servers() = call("/ip/hotspot/print").mapNotNull { it["name"] }
+    fun profiles() = call("/ip/hotspot/user/profile/print").map {
+        Profile(it[".id"] ?: "", it["name"] ?: "", parseDur(it["session-timeout"]), it["on-login"] ?: "")
     }
     fun userNames(): MutableSet<String> =
-        list("/ip/hotspot/user?.proplist=name").map { it.optString("name") }.toHashSet()
+        call("/ip/hotspot/user/print", "=.proplist=name").mapNotNull { it["name"] }.toHashSet()
     fun commentExists(c: String) =
-        list("/ip/hotspot/user?comment=${enc(c)}&.proplist=name").isNotEmpty()
+        call("/ip/hotspot/user/print", "?comment=$c", "=.proplist=name").isNotEmpty()
 
     fun createUser(v: Voucher, p: Profile, server: String, comment: String) {
-        val b = JSONObject().put("name", v.user).put("password", v.pass)
-            .put("profile", p.name).put("comment", comment).put("limit-uptime", "${p.timeout}s")
-        if (server != "all") b.put("server", server)
-        call("PUT", "/ip/hotspot/user", b)
+        val a = arrayListOf("=name=${v.user}", "=password=${v.pass}", "=profile=${p.name}",
+            "=comment=$comment", "=limit-uptime=${p.timeout}s")
+        if (server != "all") a.add("=server=$server")
+        call("/ip/hotspot/user/add", *a.toTypedArray())
     }
 
-    private fun upsert(path: String, name: String, body: JSONObject) {
-        val found = list("$path?name=${enc(name)}")
-        if (found.isNotEmpty()) call("PATCH", "$path/${found[0].getString(".id")}", body)
-        else call("PUT", path, body.put("name", name))
+    private fun upsert(base: String, name: String, attrs: List<String>) {
+        val f = call("$base/print", "?name=$name", "=.proplist=.id")
+        if (f.isNotEmpty()) call("$base/set", *(listOf("=.id=${f[0][".id"]}") + attrs).toTypedArray())
+        else call("$base/add", *(listOf("=name=$name") + attrs).toTypedArray())
     }
 
     fun installExpiry(p: Profile, expire: String, login: String) {
         val pol = "read,write,test,policy"
-        upsert("/system/script", "salam-expire", JSONObject().put("source", expire).put("policy", pol))
-        upsert("/system/scheduler", "salam-sweeper", JSONObject()
-            .put("interval", "1m").put("on-event", "salam-expire").put("policy", pol).put("start-time", "startup"))
+        upsert("/system/script", "salam-expire", listOf("=source=$expire", "=policy=$pol"))
+        upsert("/system/scheduler", "salam-sweeper",
+            listOf("=interval=1m", "=on-event=salam-expire", "=policy=$pol", "=start-time=startup"))
         val script = if (p.onLogin.isBlank()) login else p.onLogin.trimEnd() + "\n" + login
-        call("PATCH", "/ip/hotspot/user/profile/${p.id}", JSONObject().put("on-login", script))
+        call("/ip/hotspot/user/profile/set", "=.id=${p.id}", "=on-login=$script")
     }
 }
